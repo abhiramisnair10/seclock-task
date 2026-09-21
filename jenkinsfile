@@ -1,0 +1,84 @@
+pipeline {
+
+    agent any
+
+    environment {
+        AWS_REGION = 'us-east-1'
+        AWS_ACCOUNT_ID = '425951817568'
+        ECR_REPO = 'seclock'
+
+        ECR_REGISTRY = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+        IMAGE_NAME = "${ECR_REGISTRY}/${ECR_REPO}"
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('Install Dependencies') {
+            steps {
+                sh '''
+                    python3 -m venv venv
+                    . venv/bin/activate
+                    pip install --upgrade pip
+                    pip install -r requirements.txt
+                '''
+            }
+        }
+
+        stage('Run Tests') {
+            steps {
+                sh '''
+                    . venv/bin/activate
+                    pytest
+                '''
+            }
+        }
+
+        stage('SonarQube Analysis') {
+            steps {
+                echo 'SonarQube analysis will be configured here'
+            }
+        }
+
+        stage('Docker Build') {
+            steps {
+                sh '''
+                    docker build -t ${IMAGE_NAME}:${BUILD_NUMBER} .
+                '''
+            }
+        }
+
+        stage('Login to ECR') {
+            steps {
+                sh '''
+                    aws ecr get-login-password --region ${AWS_REGION} |
+                    docker login --username AWS --password-stdin ${ECR_REGISTRY}
+                '''
+            }
+        }
+
+        stage('Push Image to ECR') {
+            steps {
+                sh '''
+                    docker push ${IMAGE_NAME}:${BUILD_NUMBER}
+                '''
+            }
+        }
+
+    }
+
+    post {
+        success {
+            echo 'CI Pipeline completed successfully!'
+        }
+
+        failure {
+            echo 'Pipeline failed!'
+        }
+    }
+}
