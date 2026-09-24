@@ -1,14 +1,10 @@
 pipeline {
     agent any
 
-    tools {
-        sonarQube 'sonarscanner'
-    }
-
     environment {
-        AWS_REGION = 'ap-south-1'
+        AWS_REGION    = 'ap-south-1'
         ECR_REPOSITORY = 'seclock'
-        IMAGE_TAG = "${BUILD_NUMBER}"
+        IMAGE_TAG     = "${BUILD_NUMBER}"
     }
 
     stages {
@@ -24,8 +20,10 @@ pipeline {
             steps {
                 sh '''
                     set -e
+
                     python3 -m venv venv
                     . venv/bin/activate
+
                     pip install --upgrade pip
                     pip install -r requirements.txt
                 '''
@@ -36,7 +34,9 @@ pipeline {
             steps {
                 sh '''
                     set -e
+
                     . venv/bin/activate
+
                     python test_e2e.py
                 '''
             }
@@ -44,19 +44,37 @@ pipeline {
 
         stage('SonarQube Analysis') {
             steps {
-                withSonarQubeEnv('SonarQube') {
-                    withCredentials([
-                        string(credentialsId: 'sonar-qube', variable: 'SONAR_TOKEN')
-                    ]) {
-                        sh '''
-                            set -e
-echo "Running SonarQube analysis..."
-                            sonar-scanner \
-                              -Dsonar.projectKey=seclock \
-                              -Dsonar.projectName=Seclock \
-                              -Dsonar.sources=. \
-                              -Dsonar.token=$SONAR_TOKEN
-                        '''
+                script {
+
+                    def scannerHome = tool(
+                        name: 'sonarscanner',
+                        type: 'hudson.plugins.sonar.SonarRunnerInstallation'
+                    )
+
+                    withSonarQubeEnv('SonarQube') {
+
+                        withCredentials([
+                            string(
+                                credentialsId: 'sonar-qube',
+                                variable: 'SONAR_TOKEN'
+                            )
+                        ]) {
+
+                            sh """
+                                set -e
+
+                                echo "Checking SonarQube Scanner..."
+                                ${scannerHome}/bin/sonar-scanner --version
+
+                                echo "Running SonarQube analysis..."
+
+                                ${scannerHome}/bin/sonar-scanner \
+                                  -Dsonar.projectKey=seclock \
+                                  -Dsonar.projectName=Seclock \
+                                  -Dsonar.sources=. \
+                                  -Dsonar.token="\$SONAR_TOKEN"
+                            """
+                        }
                     }
                 }
             }
@@ -65,7 +83,11 @@ echo "Running SonarQube analysis..."
         stage('Build Docker Image') {
             steps {
                 sh '''
-                    docker build -t $ECR_REPOSITORY:$IMAGE_TAG .
+                    set -e
+
+                    docker build \
+                        -t $ECR_REPOSITORY:$IMAGE_TAG \
+                        .
                 '''
             }
         }
@@ -73,9 +95,19 @@ echo "Running SonarQube analysis..."
         stage('Login to Amazon ECR') {
             steps {
                 sh '''
-                    aws ecr get-login-password --region $AWS_REGION | \
-                    docker login --username AWS --password-stdin \
-                    $(aws sts get-caller-identity --query Account --output text).dkr.ecr.$AWS_REGION.amazonaws.com
+                    set -e
+
+                    ACCOUNT_ID=$(aws sts get-caller-identity \
+                        --query Account \
+                        --output text)
+
+                    ECR_URI=$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+
+                    aws ecr get-login-password \
+                        --region $AWS_REGION | \
+                    docker login \
+                        --username AWS \
+                        --password-stdin $ECR_URI
                 '''
             }
         }
@@ -83,11 +115,20 @@ echo "Running SonarQube analysis..."
         stage('Push Docker Image to ECR') {
             steps {
                 sh '''
-                    ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+                    set -e
+
+                    ACCOUNT_ID=$(aws sts get-caller-identity \
+                        --query Account \
+                        --output text)
+
                     ECR_URI=$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY
 
-                    docker tag $ECR_REPOSITORY:$IMAGE_TAG $ECR_URI:$IMAGE_TAG
-                    docker push $ECR_URI:$IMAGE_TAG
+                    docker tag \
+                        $ECR_REPOSITORY:$IMAGE_TAG \
+                        $ECR_URI:$IMAGE_TAG
+
+                    docker push \
+                        $ECR_URI:$IMAGE_TAG
                 '''
             }
         }
@@ -95,13 +136,21 @@ echo "Running SonarQube analysis..."
 
     post {
         success {
-            echo 'SECLOCK PIPELINE COMPLETED SUCCESSFULLY'
+            echo '''
+========================================
+SECLOCK PIPELINE COMPLETED SUCCESSFULLY
+========================================
+'''
         }
 
         failure {
-            echo 'SECLOCK PIPELINE FAILED'
+            echo '''
+========================================
+SECLOCK PIPELINE FAILED
+========================================
+Check the failed stage.
+'''
         }
     }
 }
 
-      
