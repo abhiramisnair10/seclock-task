@@ -52,7 +52,7 @@ pipeline {
                     ]) {
                         sh '''
                             set -e
-
+                            export PATH="${scannerHome}/bin:\$PATH"
                             sonar-scanner \
                                 -Dsonar.projectKey=seclock \
                                 -Dsonar.projectName=Seclock \
