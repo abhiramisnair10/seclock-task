@@ -2,17 +2,17 @@ pipeline {
     agent any
 
     environment {
-        AWS_REGION    = 'ap-south-1'
+        AWS_REGION     = 'us-east-1'
         ECR_REPOSITORY = 'seclock'
-        IMAGE_TAG     = "${BUILD_NUMBER}"
     }
 
     stages {
 
         stage('Checkout') {
             steps {
-                git branch: 'main',
-                    url: 'https://github.com/abhiramisnair10/seclock-task.git'
+                git credentialsId: 'github',
+                    url: 'https://github.com/abhiramisnair10/seclock-task.git',
+                    branch: 'main'
             }
         }
 
@@ -36,7 +36,6 @@ pipeline {
                     set -e
 
                     . venv/bin/activate
-
                     python test_e2e.py
                 '''
             }
@@ -44,37 +43,22 @@ pipeline {
 
         stage('SonarQube Analysis') {
             steps {
-                script {
+                withSonarQubeEnv('SonarQube') {
+                    withCredentials([
+                        string(
+                            credentialsId: 'sonar-qube',
+                            variable: 'SONAR_TOKEN'
+                        )
+                    ]) {
+                        sh '''
+                            set -e
 
-                    def scannerHome = tool(
-                        name: 'sonarscanner',
-                        type: 'hudson.plugins.sonar.SonarRunnerInstallation'
-                    )
-
-                    withSonarQubeEnv('SonarQube') {
-
-                        withCredentials([
-                            string(
-                                credentialsId: 'sonar-qube',
-                                variable: 'SONAR_TOKEN'
-                            )
-                        ]) {
-
-                            sh """
-                                set -e
-
-                                echo "Checking SonarQube Scanner..."
-                                ${scannerHome}/bin/sonar-scanner --version
-
-                                echo "Running SonarQube analysis..."
-
-                                ${scannerHome}/bin/sonar-scanner \
-                                  -Dsonar.projectKey=seclock \
-                                  -Dsonar.projectName=Seclock \
-                                  -Dsonar.sources=. \
-                                  -Dsonar.token="\$SONAR_TOKEN"
-                            """
-                        }
+                            sonar-scanner \
+                                -Dsonar.projectKey=seclock \
+                                -Dsonar.projectName=Seclock \
+                                -Dsonar.sources=. \
+                                -Dsonar.token=$SONAR_TOKEN
+                        '''
                     }
                 }
             }
@@ -85,50 +69,155 @@ pipeline {
                 sh '''
                     set -e
 
+                    echo "======================================"
+                    echo "Building SECLOCK Docker image"
+                    echo "======================================"
+
                     docker build \
-                        -t $ECR_REPOSITORY:$IMAGE_TAG \
-                        .
+                        -t ${ECR_REPOSITORY}:${BUILD_NUMBER} .
+
+                    echo "Docker build completed successfully."
                 '''
             }
         }
 
         stage('Login to Amazon ECR') {
             steps {
-                sh '''
-                    set -e
+                withAWS(
+                    credentials: 'aws-ecr-cred',
+                    region: "${AWS_REGION}"
+                ) {
+                    sh '''
+                        set -e
 
-                    ACCOUNT_ID=$(aws sts get-caller-identity \
-                        --query Account \
-                        --output text)
+                        AWS_ACCOUNT_ID=$(aws sts get-caller-identity \
+                            --query Account \
+                            --output text)
 
-                    ECR_URI=$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
+                        ECR_REGISTRY=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com
 
-                    aws ecr get-login-password \
-                        --region $AWS_REGION | \
-                    docker login \
-                        --username AWS \
-                        --password-stdin $ECR_URI
-                '''
+                        echo "AWS Account: ${AWS_ACCOUNT_ID}"
+                        echo "ECR Registry: ${ECR_REGISTRY}"
+
+                        aws ecr get-login-password \
+                            --region ${AWS_REGION} | \
+                        docker login \
+                            --username AWS \
+                            --password-stdin \
+                            ${ECR_REGISTRY}
+
+                        echo "ECR login successful."
+                    '''
+                }
             }
         }
 
         stage('Push Docker Image to ECR') {
             steps {
+                withAWS(
+                    credentials: 'aws-ecr-cred',
+                    region: "${AWS_REGION}"
+                ) {
+                    sh '''
+                        set -e
+
+                        AWS_ACCOUNT_ID=$(aws sts get-caller-identity \
+                            --query Account \
+                            --output text)
+
+                        ECR_IMAGE=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${BUILD_NUMBER}
+
+                        echo "======================================"
+                        echo "Pushing Docker Image"
+                        echo "======================================"
+
+                        echo "Image: ${ECR_IMAGE}"
+
+                        docker tag \
+                            ${ECR_REPOSITORY}:${BUILD_NUMBER} \
+                            ${ECR_IMAGE}
+
+                        docker push ${ECR_IMAGE}
+
+                        echo "Docker image pushed successfully."
+                    '''
+                }
+            }
+        }
+
+        stage('Update Kubernetes Manifest') {
+            steps {
+                withAWS(
+                    credentials: 'aws-ecr-cred',
+                    region: "${AWS_REGION}"
+                ) {
+                    withCredentials([
+                        string(
+                            credentialsId: 'github-token',
+                            variable: 'GITHUB_TOKEN'
+                        )
+                    ]) {
+                        sh '''
+                            set -e
+
+                            AWS_ACCOUNT_ID=$(aws sts get-caller-identity \
+                                --query Account \
+                                --output text)
+
+                            ECR_IMAGE=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${BUILD_NUMBER}
+
+                            echo "======================================"
+                            echo "Updating Kubernetes Manifest"
+                            echo "======================================"
+
+                            echo "New image:"
+                            echo "${ECR_IMAGE}"
+
+                            sed -i "s|^[[:space:]]*image:.*|          image: ${ECR_IMAGE}|" k8s/deployment.yaml
+
+                            echo ""
+                            echo "Image in deployment.yaml:"
+                            grep "image:" k8s/deployment.yaml
+
+                            git config user.name "Jenkins"
+                            git config user.email "jenkins@localhost"
+
+                            git add k8s/deployment.yaml
+
+                            git commit \
+                                -m "Deploy seclock ${BUILD_NUMBER}" \
+                                || echo "No changes to commit"
+
+                            git config credential.helper \
+                                '!f() { echo username=x-access-token; echo password=$GITHUB_TOKEN; }; f'
+
+                            git push origin HEAD:main
+
+                            git config --unset credential.helper || true
+
+                            echo "GitOps manifest pushed successfully."
+                        '''
+                    }
+                }
+            }
+        }
+
+        stage('Verify GitOps Configuration') {
+            steps {
                 sh '''
-                    set -e
+                    echo "======================================"
+                    echo "GitOps Configuration"
+                    echo "======================================"
 
-                    ACCOUNT_ID=$(aws sts get-caller-identity \
-                        --query Account \
-                        --output text)
+                    echo "Image:"
+                    grep "image:" k8s/deployment.yaml
 
-                    ECR_URI=$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY
+                    echo ""
+                    echo "Latest commit:"
+                    git log -1 --oneline
 
-                    docker tag \
-                        $ECR_REPOSITORY:$IMAGE_TAG \
-                        $ECR_URI:$IMAGE_TAG
-
-                    docker push \
-                        $ECR_URI:$IMAGE_TAG
+                    echo ""
+                    echo "Argo CD will detect this Git change."
                 '''
             }
         }
@@ -138,8 +227,11 @@ pipeline {
         success {
             echo '''
 ========================================
-SECLOCK PIPELINE COMPLETED SUCCESSFULLY
+SECLOCK PIPELINE SUCCESS
 ========================================
+Docker image pushed to ECR.
+Kubernetes manifest updated.
+Argo CD will deploy the new image.
 '''
         }
 
@@ -153,4 +245,3 @@ Check the failed stage.
         }
     }
 }
-
