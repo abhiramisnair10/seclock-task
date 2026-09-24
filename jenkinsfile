@@ -52,7 +52,9 @@ pipeline {
                     ]) {
                         sh '''
                             set -e
-
+                             echo "checking SonarScanner"
+                             which sonnar-scanner
+                             sonar-scanner --version
                             sonar-scanner \
                                 -Dsonar.projectKey=seclock \
                                 -Dsonar.projectName=Seclock \
