@@ -41,35 +41,28 @@ pipeline {
             }
         }
 
-       stage('SonarQube Analysis') {
-    steps {
-        script {
-            def scannerHome = tool 'sonar-scanner'
+        stage('SonarQube Analysis') {
+            steps {
+                withSonarQubeEnv('SonarQube') {
+                    withCredentials([
+                        string(
+                            credentialsId: 'sonar-qube',
+                            variable: 'SONAR_TOKEN'
+                        )
+                    ]) {
+                        sh '''
+                            set -e
 
-            withSonarQubeEnv('SonarQube') {
-                withCredentials([
-                    string(
-                        credentialsId: 'sonar-qube',
-                        variable: 'SONAR_TOKEN'
-                    )
-                ]) {
-                    sh """
-                        set -e
-
-                        echo "SonarScanner location:"
-                        echo "${scannerHome}"
-
-                        "${scannerHome}/bin/sonar-scanner" \
-                            -Dsonar.projectKey=seclock \
-                            -Dsonar.projectName=Seclock \
-                            -Dsonar.sources=. \
-                            -Dsonar.token=\$SONAR_TOKEN
-                    """
+                            sonar-scanner \
+                                -Dsonar.projectKey=seclock \
+                                -Dsonar.projectName=Seclock \
+                                -Dsonar.sources=. \
+                                -Dsonar.token=$SONAR_TOKEN
+                        '''
+                    }
                 }
             }
         }
-    }
-}
 
         stage('Build Docker Image') {
             steps {
@@ -158,14 +151,27 @@ pipeline {
                     credentials: 'aws-ecr-cred',
                     region: "${AWS_REGION}"
                 ) {
+
+                    /*
+                     * Reuse the existing Jenkins credential:
+                     * credentialsId: 'github'
+                     *
+                     * This credential already works in the Checkout stage.
+                     */
                     withCredentials([
-                        string(
-                            credentialsId: 'github-token',
-                            variable: 'GITHUB_TOKEN'
+                        usernamePassword(
+                            credentialsId: 'github',
+                            usernameVariable: 'GITHUB_USER',
+                            passwordVariable: 'GITHUB_TOKEN'
                         )
                     ]) {
+
                         sh '''
                             set -e
+
+                            echo "======================================"
+                            echo "Updating Kubernetes Manifest"
+                            echo "======================================"
 
                             AWS_ACCOUNT_ID=$(aws sts get-caller-identity \
                                 --query Account \
@@ -173,12 +179,11 @@ pipeline {
 
                             ECR_IMAGE=${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:${BUILD_NUMBER}
 
-                            echo "======================================"
-                            echo "Updating Kubernetes Manifest"
-                            echo "======================================"
-
                             echo "New image:"
                             echo "${ECR_IMAGE}"
+
+                            echo ""
+                            echo "Updating k8s/deployment.yaml..."
 
                             sed -i "s|^[[:space:]]*image:.*|          image: ${ECR_IMAGE}|" k8s/deployment.yaml
 
@@ -186,8 +191,14 @@ pipeline {
                             echo "Image in deployment.yaml:"
                             grep "image:" k8s/deployment.yaml
 
+                            echo ""
+                            echo "Configuring Git identity..."
+
                             git config user.name "Jenkins"
                             git config user.email "jenkins@localhost"
+
+                            echo ""
+                            echo "Committing Kubernetes manifest..."
 
                             git add k8s/deployment.yaml
 
@@ -195,13 +206,17 @@ pipeline {
                                 -m "Deploy seclock ${BUILD_NUMBER}" \
                                 || echo "No changes to commit"
 
+                            echo ""
+                            echo "Pushing GitOps change to GitHub..."
+
                             git config credential.helper \
-                                '!f() { echo username=x-access-token; echo password=$GITHUB_TOKEN; }; f'
+                                '!f() { echo username=$GITHUB_USER; echo password=$GITHUB_TOKEN; }; f'
 
                             git push origin HEAD:main
 
                             git config --unset credential.helper || true
 
+                            echo ""
                             echo "GitOps manifest pushed successfully."
                         '''
                     }
@@ -212,10 +227,13 @@ pipeline {
         stage('Verify GitOps Configuration') {
             steps {
                 sh '''
+                    set -e
+
                     echo "======================================"
                     echo "GitOps Configuration"
                     echo "======================================"
 
+                    echo ""
                     echo "Image:"
                     grep "image:" k8s/deployment.yaml
 
@@ -231,6 +249,7 @@ pipeline {
     }
 
     post {
+
         success {
             echo '''
 ========================================
