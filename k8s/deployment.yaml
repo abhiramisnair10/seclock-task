@@ -3,6 +3,7 @@ kind: Deployment
 
 metadata:
   name: seclock-deployment
+  namespace: seclock
 
 spec:
   replicas: 2
