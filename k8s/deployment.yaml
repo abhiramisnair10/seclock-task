@@ -20,7 +20,7 @@ spec:
       containers:
         - name: seclock
 
-          image: YOUR_AWS_ACCOUNT_ID.dkr.ecr.us-east-1.amazonaws.com/seclock:latest
+          image: 425951817568.dkr.ecr.us-east-1.amazonaws.com/seclock:14
 
           ports:
             - containerPort: 8000
